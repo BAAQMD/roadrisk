@@ -1,0 +1,162 @@
+---
+title: "Harvesting EMFAC2014"
+date: "`r Sys.Date()`"
+output: inventory::draft_html
+params:
+  DATA_TYPE:  "emissions"
+  GEO_LEVEL:  "sub_area"
+  VEH_CATS:   "emfac2007"
+  SEASON:     !r c("annual")
+  YEARS:      !r 2000:2050
+  DEBUG:      TRUE
+---
+
+This Rmarkdown document harvests, reshapes, and exports data from the [EMFAC2014 v1.07 website](http://www.arb.ca.gov/emfac/2014/) ("EMFAC2014 v1.07").
+
+```{r libraries, echo = FALSE, message = FALSE}
+library(inventory)
+library(rvest)
+library(httr)
+```
+
+```{r setwd, eval = FALSE}
+setwd(project_path("in", "emission_rates"))
+options(cacher.root = "~/cache")
+```
+
+```{r REGION_CHOICES}
+REGION_CHOICES <- c(
+  "ALA" = "Alameda (SF)", 
+  "CC" = "Contra Costa (SF)", 
+  "MAR" = "Marin (SF)",
+  "NAP" = "Napa (SF)", 
+  "SF" = "San Francisco (SF)", 
+  "SM" = "San Mateo (SF)",
+  "SCL" = "Santa Clara (SF)", 
+  "SOL" = "Solano (SF)", 
+  "SON" = "Sonoma (SF)")
+```
+
+```{r harvest_chunk}
+harvest_chunk <- function (args) {
+  require(httr)
+  require(readr)
+  response_obj <- httr::POST(
+    url = "http://www.arb.ca.gov/emfac/2014/csv.php",
+    body = args, 
+    encode = "form")
+  httr::stop_for_status(response_obj)
+  httr::content(response_obj, as = "text")
+}
+```
+
+## Speedwise emissions
+
+```{r EMFAC2014_speedwise_tbl}
+speedwise_args <- expand_grid(
+  data_type      = params$DATA_TYPE, 
+  geo_level      = params$GEO_LEVEL, 
+  region         = REGION_CHOICES, # each & every one
+  `cal_year[]`   = params$YEARS,
+  season         = params$SEASON,
+  veh_cat_type   = params$VEH_CATS,
+  veh_cat_option = "all", 
+  model_year     = "aggregated", 
+  speed          = "all", 
+  fuel           = "All")
+
+EMFAC2014_speedwise_tbl <-
+  rowwise(speedwise_args) %>% 
+  do({
+    args <- as.list(.)
+    response_txt <- do.call(cached, args) %or% harvest_chunk(args)
+    readr::read_csv(response_txt, skip = 8)
+  }) %>% 
+  ungroup()
+
+glimpse(EMFAC2014_speedwise_tbl)
+
+EMFAC2014_speedwise_tbl %>% 
+  filter(CalYr == min(params$YEARS))
+
+EMFAC2014_speedwise_tbl %>% 
+  filter(CalYr == max(params$YEARS))
+```
+
+```{r has_values}
+has_values <- function (x, values) !is.null(x) && setequal(unique(x), unique(values))
+```
+
+```{r VALUE_UNITS}
+VALUE_UNITS <-
+  switch(params$DATA_TYPE, emissions = "Tons", emission_rates = "g/VMT")
+```
+
+```{r EMFAC2014_speedwise_data}
+EMFAC2014_speedwise_data <-
+  EMFAC2014_speedwise_tbl %>%
+  ensure(all(.$MdlYr == "Aggregated")) %>%
+  select(-MdlYr) %>%
+  gather(Metric, Value, matches("_RUNEX")) %>%
+  rename_(.dots = setNames("Value", VALUE_UNITS)) %>%
+  mutate(Metric = Metric %>% str_replace("PM2_5", "PM2.5")) %>%
+  separate(Metric, into = c("Pollutant", "Mode"), sep = "_")
+```
+
+## Tripwise emissions
+
+```{r EMFAC2014_tripwise_tbl}
+tripwise_args <-
+  speedwise_args %>%
+  mutate(speed = "aggregated")
+
+EMFAC2014_tripwise_tbl <-
+  rowwise(tripwise_args) %>% 
+  do({
+    args <- as.list(.)
+    response_txt <- do.call(cached, args) %or% harvest_chunk(args)
+    readr::read_csv(response_txt, skip = 8)
+  }) %>% 
+  ungroup()
+
+glimpse(EMFAC2014_tripwise_tbl)
+
+EMFAC2014_tripwise_tbl %>% 
+  filter(CalYr == min(params$YEARS))
+
+EMFAC2014_tripwise_tbl %>% 
+  filter(CalYr == max(params$YEARS))
+```
+
+```{r EMFAC2014_tripwise_data}
+EMFAC2014_tripwise_data <-
+  tripwise_data %>%
+  ensure(all(.$MdlYr == "Aggregated"), all(.$Speed == "Aggregated")) %>%
+  select(-MdlYr, -Speed) %>%
+  rename(Gallons = Fuel_Consumption) %>%
+  gather(Metric, Value, matches("_[A-Z]+")) %>%
+  rename_(.dots = setNames("Value", VALUE_UNITS)) %>%
+  mutate(Metric = Metric %>% str_replace("PM2_5", "PM2.5")) %>%
+  separate(Metric, into = c("Pollutant", "Mode"), sep = "_")
+```
+
+```{r save_data}
+EMFAC2014_speedwise_data %>%
+  filter(Pollutant %in% c("TOG", "PM10", "PM2.5", "CO2")) %>%
+  filter(CalYr %in% params$YEARS) %>%
+  write_csv(build_path("emission_rates", "EMFAC2014-v1.07-speedwise.csv"))
+
+EMFAC2014_tripwise_data %>%
+  filter(Pollutant %in% c("TOG", "PM10", "PM2.5", "CO2")) %>%
+  filter(CalYr %in% params$YEARS) %>%
+  write_csv(build_path("emission_rates", "EMFAC2014-v1.07-tripwise.csv"))
+
+#outfile <- file.path("emission_factors", "EMFAC2014", str_c("EMFAC2014-v1.07-", params$DATA_TYPE, ".Rda"))
+#
+#message("Saving to ", outfile)
+#
+#save(EMFAC2014_speedwise_data, 
+#     EMFAC2014_tripwise_data, 
+#     file = outfile,
+#     compress = "xz")
+```
